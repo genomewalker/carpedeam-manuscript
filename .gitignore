@@ -1,0 +1,12 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+src/.snakemake/*
+old/*
+data/old/*
+results/old/*
+figures/old/*
+data/*
+results/*
+~$*.*

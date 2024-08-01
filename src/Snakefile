@@ -1,0 +1,343 @@
+import os
+
+
+configfile: "config.yaml"
+
+
+def get_assembly_file(wildcards):
+    assembler_map = {
+        "megahit": "raw-raw.assm.megahit.config0",
+        "carpedeam-safe": "raw-raw.assm.carpedeam2.config7020CarpeDeam15p5",
+        "carpedeam-unsafe": "raw-raw.assm.carpedeam2.config7022CarpeDeam15p5",
+    }
+    return os.path.join(
+        config["assembly_location"],
+        f"{config['samples'][wildcards.sample]}.{assembler_map[wildcards.assembler]}.fasta.gz",
+    )
+
+
+def get_replacement_pattern(wildcards):
+    if wildcards.assembler == "megahit":
+        return f"{wildcards.sample}" + "-mh-{nr}"
+    elif wildcards.assembler == "carpedeam-safe":
+        return f"{wildcards.sample}" + "-cp_s-{nr}"
+    elif wildcards.assembler == "carpedeam-unsafe":
+        return f"{wildcards.sample}" + "-cp_u-{nr}"
+    else:
+        raise ValueError(f"Unknown assembler: {wildcards.assembler}")
+
+# Define the rule to specify the final targets
+rule all:
+    input:
+        expand(
+            os.path.join(
+                config["working_directory"], "{sample}_{assembler}.renamed.faa"
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        expand(
+            os.path.join(config["working_directory"], "{sample}_{assembler}.gff"),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        os.path.join(config["working_directory"], "protein_stats.tsv"),
+        expand(
+            os.path.join(
+                config["working_directory"], "protein_stats_derep_{identity}.tsv"
+            ),
+            identity=config["identity_thresholds"],
+        ),
+        expand(
+            os.path.join(
+                config["working_directory"],
+                "{sample}_{assembler}_{identity}_search.tsv",
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+            identity=config["identity_thresholds"],
+        ),
+        expand(
+            os.path.join(config["working_directory"], "{sample}_{assembler}.ani.tsv"),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        expand(
+            os.path.join(
+                config["working_directory"], "{sample}_{assembler}.search-skani.tsv"
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        expand(
+            os.path.join(
+                config["working_directory"], "{sample}_{assembler}.contig_stats.tsv"
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        derep=expand(
+            os.path.join(
+                config["working_directory"],
+                "{sample}_{assembler}_{identity}_rep_seq.fasta",
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+            identity=config["identity_thresholds"],
+        ),
+        cluster=expand(
+            os.path.join(
+                config["working_directory"],
+                "{sample}_{assembler}_{identity}_cluster.tsv",
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+            identity=config["identity_thresholds"],
+        ),
+        combined_rep_seq=expand(
+            os.path.join(
+                config["working_directory"],
+                "{sample}_{identity}-combined_rep_seq.fasta",
+            ),
+            sample=config["samples"].keys(),
+            identity=config["identity_thresholds"],
+        ),
+        combined_cluster=expand(
+            os.path.join(
+                config["working_directory"], "{sample}_{identity}-combined_cluster.tsv"
+            ),
+            sample=config["samples"].keys(),
+            identity=config["identity_thresholds"],
+        ),
+
+
+# Rule to get contig statistics with seqkit
+rule get_contig_stats:
+    input:
+        assembly=get_assembly_file,
+    output:
+        os.path.join(
+            config["working_directory"], "{sample}_{assembler}.contig_stats.tsv"
+        ),
+    conda:
+        "bioinfo"
+    shell:
+        """
+        seqkit fx2tab -l -n {input.assembly} > {output}
+        """
+
+
+# Rule to run Prodigal
+rule run_prodigal:
+    input:
+        assembly=get_assembly_file,
+    output:
+        faa=os.path.join(config["working_directory"], "{sample}_{assembler}.faa"),
+        gff=os.path.join(config["working_directory"], "{sample}_{assembler}.gff"),
+    conda:
+        "bioinfo"
+    shell:
+        """
+        zcat {input.assembly} | prodigal -i /dev/stdin -p meta -a {output.faa} -m -f gff -o {output.gff} -q
+        """
+
+
+# Rule to rename the protein IDs with seqkit
+rule rename_proteins:
+    input:
+        faa=os.path.join(config["working_directory"], "{sample}_{assembler}.faa"),
+    output:
+        os.path.join(config["working_directory"], "{sample}_{assembler}.renamed.faa"),
+    params:
+        replacement_pattern=lambda wildcards: get_replacement_pattern(wildcards),
+    conda:
+        "bioinfo"
+    shell:
+        """
+        sed 's/*//g' {input.faa} | seqkit replace -p '.+' -r '{params.replacement_pattern}' > {output}
+        """
+
+
+# Get statistics for the predicted proteins with seqkit
+# Get all renamed files and run seqkit stats on them and combine the results in one file
+# Add the sample name as a column in the output file
+rule get_protein_stats:
+    input:
+        faa=expand(
+            os.path.join(
+                config["working_directory"], "{sample}_{assembler}.renamed.faa"
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+    output:
+        os.path.join(config["working_directory"], "protein_stats.tsv"),
+    conda:
+        "bioinfo"
+    threads: 16
+    shell:
+        """
+        seqkit stats -T -j {threads} {input.faa} | \
+            awk 'BEGIN {{FS=OFS="\\t"}} NR==1 {{print "Sample", $0}} NR>1 {{sample=$1; sub(".*/", "", sample); sub(".renamed.faa", "", sample); print sample, $0}}' > {output}
+        """
+
+
+# Rule to dereplicate the protein sequences, using mmseqs
+# --kmer-per-seq 80 --cov-mode 1 -c 0.8 --min-seq-id 0.9
+# Rule to dereplicate proteins at various identity thresholds
+rule dereplicate_proteins:
+    wildcard_constraints:
+        identity=lambda identity: identity in config["identity_thresholds"],
+    input:
+        faa=os.path.join(
+            config["working_directory"], "{sample}_{assembler}.renamed.faa"
+        ),
+    output:
+        rep_seq=os.path.join(
+            config["working_directory"],
+            "{sample}_{assembler}_{identity}_rep_seq.fasta",
+        ),
+        cluster=os.path.join(
+            config["working_directory"], "{sample}_{assembler}_{identity}_cluster.tsv"
+        ),
+    params:
+        tmp_dir=lambda wildcards: os.path.join(
+            config["working_directory"],
+            f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}",
+        ),
+        min_seq_id=lambda wildcards: wildcards.identity,
+    threads: 2
+    conda:
+        "bioinfo"
+    shell:
+        """
+        mmseqs easy-cluster {input.faa} {params.tmp_dir} {params.tmp_dir}_tmp --kmer-per-seq 80 --cov-mode 1 -c 0.8 --min-seq-id {params.min_seq_id} --threads {threads}
+        """
+
+
+# Identify shared and unique proteins in the dereplicated protein between assemblers for the same sample, make all assembler pairwise combinations.
+# SHould be done by mmseqs cluster
+rule cluster_between_assemblers:
+    input:
+        rep_seq=lambda wildcards: expand(
+            os.path.join(
+                config["working_directory"],
+                "{sample}_{assembler}_{identity}_rep_seq.fasta",
+            ),
+            assembler=config["assemblers"],
+            sample=[wildcards.sample],  # Ensure only the current sample is included
+            identity=[wildcards.identity],
+        ),
+    output:
+        combined_rep_seq=os.path.join(
+            config["working_directory"],
+            "{sample}_{identity}-combined_rep_seq.fasta",
+        ),
+        combined_cluster=os.path.join(
+            config["working_directory"], "{sample}_{identity}-combined_cluster.tsv"
+        ),
+    params:
+        tmp_dir=lambda wildcards: os.path.join(
+            config["working_directory"],
+            f"{wildcards.sample}_{wildcards.identity}-combined",
+        ),
+    threads: 2,
+    conda:
+        "bioinfo",
+    shell:
+        """
+        mmseqs easy-cluster {input.rep_seq} {params.tmp_dir} {params.tmp_dir}_tmp --kmer-per-seq 80 --cov-mode 1 -c 0.8 --min-seq-id 0.95 --threads {threads}
+        """
+# Rule to get the protein stats
+rule get_dereplicated_protein_stats:
+    input:
+        rep_seq=lambda wildcards: expand(
+            os.path.join(
+                config["working_directory"],
+                "{sample}_{assembler}_{identity}_rep_seq.fasta",
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+            identity=[wildcards.identity],
+        ),
+    output:
+        stats=os.path.join(
+            config["working_directory"], "protein_stats_derep_{identity}.tsv"
+        ),
+    conda:
+        "bioinfo"
+    threads: 16
+    shell:
+        """
+        seqkit stats -T -j {threads} {input.rep_seq} | \
+            awk 'BEGIN {{FS=OFS="\\t"}} NR==1 {{print "Sample", "Identity", $0}} NR>1 {{sample_identity=$1; sub(".*/", "", sample_identity); sub("_rep_seq.fasta", "", sample_identity); split(sample_identity, a, "_"); sample=a[1]; for(i=2;i<NF-2;i++) sample=sample"_"a[i]; identity=a[length(a)]; print sample, identity, $0}}' > {output.stats}
+        """
+
+
+# Rule to map proteins against the database of all genomes with mmseqs2
+rule search_proteins:
+    input:
+        rep_seq=os.path.join(
+            config["working_directory"],
+            "{sample}_{assembler}_{identity}_rep_seq.fasta",
+        ),
+    output:
+        os.path.join(
+            config["working_directory"], "{sample}_{assembler}_{identity}_search.tsv"
+        ),
+    params:
+        db=os.path.join(config["protein_location"], "ancientGut-aa"),
+        query_db=lambda wildcards: os.path.join(
+            config["working_directory"],
+            f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}-aa",
+        ),
+        tmp_dir=lambda wildcards: os.path.join(
+            config["working_directory"],
+            f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}_tmp",
+        ),
+        resdb=lambda wildcards: os.path.join(
+            config["working_directory"],
+            f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}",
+        ),
+    threads: 2
+    conda:
+        "bioinfo"
+    shell:
+        """
+        mmseqs createdb {input.rep_seq} {params.query_db}
+        mmseqs map {params.query_db} {params.db} {params.resdb} {params.tmp_dir} --threads {threads} -a
+        mmseqs convertalis {params.query_db} {params.db} {params.resdb} {output} --threads {threads} --format-output 'query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qlen,tlen'
+        """
+
+
+# Rule to calculate ANI between the contigs in each assembly using skani
+rule calculate_ani:
+    input:
+        assembly=get_assembly_file,
+    output:
+        os.path.join(config["working_directory"], "{sample}_{assembler}.ani.tsv"),
+    conda:
+        "bioinfo"
+    shell:
+        """
+        skani triangle -E -t {threads} -i {input.assembly} -o {output} --small-genomes
+        """
+
+
+# Use skani to search the assembly against the database of all genomes
+rule search_ani:
+    input:
+        assembly=get_assembly_file,
+    output:
+        os.path.join(
+            config["working_directory"], "{sample}_{assembler}.search-skani.tsv"
+        ),
+    params:
+        db=os.path.join(config["genome_location"], "gut_simulation_skani_sketch"),
+    conda:
+        "bioinfo"
+    threads: 2
+    shell:
+        """
+        skani search --qi {input.assembly} -t {threads} -d {params.db} -o {output}
+        """

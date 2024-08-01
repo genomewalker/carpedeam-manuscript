@@ -1,0 +1,18 @@
+assembly_location: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/assemblies/ancientGut/"
+working_directory: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/genes/ancientGut"
+protein_location: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/genome-genes/ancientGut"
+genome_location: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/genomes/ancientGut"
+samples:
+  gut_sum_high_c3: 4843e2efab
+  gut_sum_high_c5: 5625abfa64
+  gut_sum_high_c10: 147b4cc2c4
+  gut_sum_mid_c3: ad4291da14
+  gut_sum_mid_c5: acc997e351
+  gut_sum_mid_c10: 30fa72e389
+assemblers:
+  - megahit
+  - carpedeam-safe
+  - carpedeam-unsafe
+identity_thresholds:
+  - 0.95
+  - 1.00
