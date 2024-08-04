@@ -4,11 +4,12 @@ library(showtext)
 library(tidygraph)
 library(igraph)
 library(UpSetR)
-
+library(ggh4x)
 showtext_auto()
 
 # Get contigs stats
-contigs_files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = ".contig_stats.tsv")
+contigs_files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = ".contig_stats.tsv")
+min_contig_length <- 1000
 
 read_contig_files <- function(filename) {
     pattern <- "^(.*)_(.*)\\.contig_stats\\.tsv$"
@@ -26,9 +27,8 @@ read_contig_files <- function(filename) {
     return(df)
 }
 
-contigs <- map_dfr(contigs_files, read_contig_files)
-
-min_contig_length <- 1000
+contigs <- map_dfr(contigs_files, read_contig_files) |>
+    filter(length >= min_contig_length)
 
 contig_stats <- contigs |>
     filter(length >= min_contig_length) |>
@@ -70,7 +70,7 @@ skani_allvsall_genome |>
 
 
 # Which is the level of redundancy in the different assemblies based on the ANI?
-skani_contigs_files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = "\\.ani.tsv")
+skani_contigs_files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = "\\.ani.tsv")
 
 read_skani_contig_file <- function(filename) {
     pattern <- "^(.*)_(.*)\\.ani\\.tsv$"
@@ -163,6 +163,36 @@ get_component_info <- function(graph) {
     list(components = components, num_components = num_components, num_nodes = igraph::vcount(graph))
 }
 
+# Get non-redundant set of contigs by selecting the longest contig in each clique
+get_non_redundant_contigs <- function(graph) {
+    graph |>
+        activate(nodes) |>
+        as_tibble() |>
+        filter(clique_membership > 0) |>
+        group_by(clique_membership) |>
+        filter(length == max(length)) |>
+        ungroup()
+}
+
+get_redundant_contigs <- function(graph) {
+    graph |>
+        activate(nodes) |>
+        as_tibble() |>
+        filter(clique_membership > 0) |>
+        group_by(clique_membership) |>
+        filter(length != max(length)) |>
+        ungroup()
+}
+
+# Find nodes not in cliques
+get_orphan_contigs <- function(graph) {
+    graph |>
+        activate(nodes) |>
+        as_tibble() |>
+        filter(clique_membership == 0)
+}
+
+
 # Apply the function to each graph in the list and get stats
 graph_stats <- g |>
     mutate(
@@ -170,11 +200,14 @@ graph_stats <- g |>
         component_size = map(component_info, "components"),
         num_components = map_int(component_info, "num_components"),
         num_nodes = map_int(component_info, "num_nodes"),
+        non_redundant_contigs = map(graph, get_non_redundant_contigs),
+        redundant_contigs = map(graph, get_redundant_contigs),
+        orphan_contigs = map(graph, get_orphan_contigs)
     ) |>
     inner_join(contig_stats |> select(sample, assembler, n_contigs), by = c("sample", "assembler"))
 
 # Where do this contigs map in the reference genomes?
-skani_search_files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = "\\.search-skani.tsv")
+skani_search_files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = "\\.search-skani.tsv")
 read_skani_search_file <- function(filename) {
     pattern <- "^(.*)_(.*)\\.search-skani\\.tsv$"
     matches <- str_match(basename(filename), pattern)
@@ -448,6 +481,7 @@ mapping_stats |>
             grepl("high", sample) ~ "high",
         ),
         assm = case_when(
+            grepl("carpedeam-unsafe-refined", assembler) ~ "Carpedeam\n(unsafe r)",
             grepl("carpedeam-unsafe", assembler) ~ "Carpedeam\n(unsafe)",
             grepl("carpedeam-safe", assembler) ~ "Carpedeam\n(safe)",
             grepl("megahit", assembler) ~ "Megahit",
@@ -460,7 +494,7 @@ mapping_stats |>
     ) |>
     ggplot(aes(x = assm, y = bp, fill = name)) +
     geom_bar(stat = "identity", position = "stack", width = 1, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "M", scale = 1e-6)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
     scale_fill_manual(values = colors, name = NULL) +
     facet_grid2(c("dmg", "cov"),
         labeller = "label_both",
@@ -475,9 +509,89 @@ mapping_stats |>
     xlab("")
 
 
+# Create a tibble with the contigs that are non_redundant, redundant and orphan
+contigs <- graph_stats |>
+    select(sample, assembler, non_redundant_contigs) |>
+    unnest(non_redundant_contigs) |>
+    select(sample, assembler, contig_id = name) |>
+    mutate(type = "representative") |>
+    bind_rows(
+        graph_stats |>
+            select(sample, assembler, redundant_contigs) |>
+            unnest(redundant_contigs) |>
+            select(sample, assembler, contig_id = name) |>
+            mutate(type = "redundant")
+    ) |>
+    bind_rows(
+        graph_stats |>
+            select(sample, assembler, orphan_contigs) |>
+            unnest(orphan_contigs) |>
+            select(sample, assembler, contig_id = name) |>
+            mutate(type = "orphan")
+    ) |>
+    right_join(contigs) |>
+    mutate(type = ifelse(is.na(type), "non_redundant", type))
+
+
+
+# Let's save the contigs to a file
+# Export contigs
+keys <- c(
+    "gut_sum_high_c3", "gut_sum_high_c5", "gut_sum_high_c10",
+    "gut_sum_mid_c3", "gut_sum_mid_c5", "gut_sum_mid_c10"
+)
+values <- c(
+    "4843e2efab", "5625abfa64", "147b4cc2c4",
+    "ad4291da14", "acc997e351", "30fa72e389"
+)
+
+# Combine the vectors into a dataframe
+smp_trans <- tibble(sample = keys, short_label = values)
+
+keys <- c("megahit", "carpedeam-safe", "carpedeam-unsafe")
+values <- c("raw-raw.assm.megahit.config0", "raw-raw.assm.carpedeam2.config7020CarpeDeam15p5", "raw-raw.assm.carpedeam2.config7022CarpeDeam15p5")
+
+assm_trans <- tibble(assembler = keys, long_label = values)
+
+contigs |>
+    inner_join(smp_trans) |>
+    inner_join(assm_trans) |>
+    write_tsv("data/contigs-ge1000bp-class.tsv")
+
+
+samples <- c(
+    "gut_sum_high_c3", "gut_sum_high_c5", "gut_sum_high_c10",
+    "gut_sum_mid_c3", "gut_sum_mid_c5", "gut_sum_mid_c10"
+)
+
+assemblers <- c(
+    "raw-raw.assm.megahit.config0",
+    "raw-raw.assm.carpedeam2.config7020CarpeDeam15p5",
+    "raw-raw.assm.carpedeam2.config7022CarpeDeam15p5"
+)
+
+# Generate all combinations
+combinations <- expand.grid(smp = samples, assm = assemblers)
+
+# Apply the function to each combination
+pmap(combinations, function(smp, assm) {
+    contigs |>
+        inner_join(smp_trans) |>
+        inner_join(assm_trans) |>
+        filter(sample == smp, long_label == assm, type != "redundant") |>
+        select(contig_id) |>
+        write_tsv(paste0("data/contigs-derep/", smp, ".", assm, "_derep_contigs.tsv"), col_names = FALSE)
+})
+
+
+
+
+
+
+
 ### PROTEIN analyses
 # How many proteins are in the different assemblies?
-files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = "protein_stats")
+files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = "protein_stats")
 read_protein_stats <- function(X) {
     df <- read_tsv(X) |>
         clean_names()
@@ -543,7 +657,7 @@ data |>
     mutate(identity = fct_relevel(identity, rev(c("0.95", "1.0", "raw")))) |>
     ggplot(aes(x = assm, y = num_seqs, fill = identity)) +
     geom_bar(stat = "identity", position = "stack", width = 1, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
     labs(
         x = "Assembler",
         y = "# Proteins",
@@ -564,7 +678,7 @@ data |>
 
 
 # Now, let's check the degree of overlap between
-files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = "combined_cluster.tsv")
+files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = "combined_cluster.tsv")
 
 read_cluster_file <- function(filename) {
     pattern <- "^(.*)_(.*)-combined_cluster\\.tsv$"
@@ -683,7 +797,7 @@ colors <- c(all = "#2066a8", cp = "#3594cC", other = "#8cc5e3", cp_s = "#a00000"
 
 ggplot(data, aes(x = identity, y = n, fill = category)) +
     geom_bar(stat = "identity", position = "stack", width = 0.9, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
     labs(
         x = "Clustering identity",
         y = "#Proteins",
@@ -705,7 +819,7 @@ ggplot(data, aes(x = identity, y = n, fill = category)) +
 
 
 # Let's see who this proteins map to
-files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = "_search.tsv")
+files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = "_search.tsv")
 
 read_search_file <- function(filename) {
     pattern <- "^(.*)_(.*)_(.*)_search\\.tsv$"
@@ -782,7 +896,6 @@ data <- aggregated_data |>
 colors <- c("hits" = "#424242", "no_hits" = "#AE4740")
 ggplot(data |> filter(identity == "1.0"), aes(x = assm, y = n, fill = type)) +
     geom_bar(stat = "identity", position = "stack", width = 1, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
     labs(
         x = "Assembler",
         y = "# Proteins",
@@ -797,12 +910,13 @@ ggplot(data |> filter(identity == "1.0"), aes(x = assm, y = n, fill = type)) +
         strip.background = element_blank(),
         legend.position = "bottom",
     ) +
-    scale_fill_manual(values = colors, name = NULL)
+    scale_fill_manual(values = colors, name = NULL) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1))
 
 # Plot figures 7
 ggplot(data |> filter(identity == "0.95"), aes(x = assm, y = n, fill = type)) +
     geom_bar(stat = "identity", position = "stack", width = 1, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
     labs(
         x = "Assembler",
         y = "# Proteins",
@@ -855,7 +969,7 @@ data <- aggregated_data |>
 colors <- c("hits" = "#424242", "no_hits" = "#AE4740")
 ggplot(data, aes(x = identity, y = n, fill = type)) +
     geom_bar(stat = "identity", position = "stack", width = 1, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
     labs(
         x = "Assembler",
         y = "# Proteins",
@@ -908,7 +1022,7 @@ data <- aggregated_data |>
 colors <- c("hits" = "#424242", "no_hits" = "#AE4740")
 ggplot(data, aes(x = identity, y = n, fill = type)) +
     geom_bar(stat = "identity", position = "stack", width = 1, color = "black", linewidth = 0.3) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
     labs(
         x = "Assembler",
         y = "# Proteins",
@@ -928,7 +1042,7 @@ ggplot(data, aes(x = identity, y = n, fill = type)) +
 
 # Why if there are more contigs in CP we have the same number of proteins?
 
-gff_files <- list.files("./data/genes/ancientGut", full.names = TRUE, pattern = "gff")
+gff_files <- list.files("./data/genes/ancientGut-old", full.names = TRUE, pattern = "gff")
 
 read_gff_files <- function(filename) {
     pattern <- "^(.*)_(.*)\\.gff$"
@@ -1005,7 +1119,7 @@ gff_data |>
         strip.background = element_blank(),
         legend.position = "bottom",
     ) +
-    scale_y_continuous(labels = scales::unit_format(unit = "M", scale = 1e-6)) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
     scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300"), name = NULL)
 
 
@@ -1050,15 +1164,26 @@ prokka_features <- gff_data |>
     inner_join(contigs) |>
     mutate(coding_density = coding_bp / length) |>
     # filter(coding_density < 1 / 2) |>
-    inner_join(skani_search |> select(contig_id = query_name, sample, assembler, ani, align_fraction_query)) |>
+    inner_join(skani_search |> select(contig_id = query_name, sample, assembler) |> distinct()) |>
     inner_join(prokka_annotations |> select(contig_id, sample, assembler, feature, feature_length))
+
+
+prokka_features_nc <- prokka_features |>
+    # filter(type != "redundant") |>
+    group_by(sample, assembler, contig_id, n, coding_bp, type, length, coding_density) |>
+    summarize(feature_length = sum(feature_length), .groups = "drop") |>
+    inner_join(contigs |> select(sample, assembler, contig_id, length)) |>
+    mutate(feature = "NC", nc_length = length - feature_length) |>
+    select(sample, assembler, contig_id, n, coding_bp, type, length, coding_density, feature, feature_length = nc_length)
 
 # Which prokka features are in those contigs where less than 50% of their bps are not producing CDS
 prokka_features |>
-    filter(coding_density < 1 / 2) |>
+    bind_rows(prokka_features_nc) |>
+    filter(type != "redundant") |>
+    # filter(coding_density < 1 / 2) |>
     group_by(sample, assembler, feature) |>
     summarize(n = n(), length = sum(feature_length), .groups = "drop") |>
-    # filter(feature != "CDS") |>
+    filter(feature != "CDS", feature != "NC") |>
     mutate(
         cov = case_when(
             grepl("c3", sample) ~ "3X",
@@ -1095,5 +1220,158 @@ prokka_features |>
         strip.background = element_blank(),
         legend.position = "bottom",
     ) +
-    scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3)) +
-    scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300", "#F09868", "#91AEB7"), name = NULL)
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
+    scale_fill_manual(values = c("#3A7B72", "#EB554A", "#FFC300", "#F09868", "#91AEB7", "#2D2D2D"), name = NULL)
+
+
+prokka_features |>
+    bind_rows(prokka_features_nc) |>
+    # filter(type != "redundant") |>
+    # filter(coding_density < 1 / 2) |>
+    group_by(sample, assembler, feature) |>
+    summarize(n = n(), length = sum(feature_length), .groups = "drop") |>
+    filter(feature != "CDS", feature != "NC") |>
+    mutate(
+        cov = case_when(
+            grepl("c3", sample) ~ "3X",
+            grepl("c5", sample) ~ "5X",
+            grepl("c10", sample) ~ "10X",
+        ),
+        dmg = case_when(
+            grepl("mid", sample) ~ "mid",
+            grepl("high", sample) ~ "high",
+        ),
+        assm = case_when(
+            grepl("carpedeam-unsafe", assembler) ~ "Carpedeam\n(unsafe)",
+            grepl("carpedeam-safe", assembler) ~ "Carpedeam\n(safe)",
+            grepl("megahit", assembler) ~ "Megahit",
+        )
+    ) |>
+    mutate(
+        cov = fct_relevel(cov, c("3X", "5X", "10X")),
+        dmg = fct_relevel(dmg, c("high", "mid")),
+        feature = fct_reorder(feature, length)
+    ) |>
+    ggplot(aes(x = assm, y = length, fill = feature)) +
+    geom_col(alpha = 0.8, color = "black") +
+    labs(
+        x = "Assembler",
+        y = "Base pairs",
+    ) +
+    facet_grid2(c("dmg", "cov"),
+        labeller = "label_both",
+        scales = "free", independent = "all"
+    ) +
+    theme_bw() +
+    theme(
+        strip.background = element_blank(),
+        legend.position = "bottom",
+    ) +
+    scale_y_continuous(labels = scales::label_number(accuracy = 1, scale_cut = scales::cut_short_scale())) +
+    scale_fill_manual(values = c("#3A7B72", "#EB554A", "#FFC300", "#F09868", "#91AEB7", "#2D2D2D"), name = NULL)
+
+# Read xRNA searches
+search_rna_files <- list.files("./data/annotations/ancientGut", full.names = TRUE, pattern = ".rna.search.tsv")
+
+
+read_search_rna_files <- function(filename) {
+    pattern <- "^(.*).raw-raw.proteins.(.*)\\.rna.search\\.tsv$"
+    matches <- str_match(basename(filename), pattern)
+
+    # Extract the matched groups
+    sample <- matches[2]
+    assembler <- matches[3]
+    # header: query+target+id+alnlen+mism+opens+ql+tl+qcov+tcov
+    df <- read_tsv(filename, col_names = c("query", "target", "pident", "alnlen", "mismatch", "gapopen", "qlen", "tlen", "qcov", "tcov")) |>
+        clean_names() |>
+        mutate(sample = sample, assembler = assembler)
+    return(df)
+}
+
+# Read the GFFs
+rna_searches <- map_dfr(search_rna_files, read_search_rna_files)
+
+rna_searches |>
+    filter(target == "*")
+
+rna_searches |>
+    filter(target != "*") |>
+    mutate(
+        cov = case_when(
+            grepl("c3", sample) ~ "3X",
+            grepl("c5", sample) ~ "5X",
+            grepl("c10", sample) ~ "10X",
+        ),
+        dmg = case_when(
+            grepl("mid", sample) ~ "mid",
+            grepl("high", sample) ~ "high",
+        ),
+        assm = case_when(
+            grepl("7022", assembler) ~ "Carpedeam\n(unsafe)",
+            grepl("7020", assembler) ~ "Carpedeam\n(safe)",
+            grepl("megahit", assembler) ~ "Megahit",
+        )
+    ) |>
+    mutate(
+        cov = fct_relevel(cov, c("3X", "5X", "10X")),
+        dmg = fct_relevel(dmg, c("high", "mid")),
+    ) |>
+    ggplot(aes(x = assm, y = pident)) +
+    geom_boxplot() +
+    facet_grid2(c("dmg", "cov"),
+        labeller = "label_both",
+        scales = "free", independent = "all"
+    )
+
+
+rna_searches |>
+    separate(target, into = c("accession", "type", "detail"), sep = "\\|", remove = F) |>
+    select(query, target, pident, type, detail, assembler, sample) |>
+    mutate(
+        type = ifelse(is.na(type), "nohit", type),
+        id = case_when(
+            type == "nohit" ~ "nohit",
+            pident >= 98 ~ ">=98% ",
+            pident < 98 ~ "<98%"
+        )
+    ) |>
+    group_by(id, type, assembler, sample) |>
+    count() |>
+    ungroup() |>
+    complete(id, type, assembler, sample, fill = list(n = 0)) |>
+    mutate(
+        cov = case_when(
+            grepl("c3", sample) ~ "3X",
+            grepl("c5", sample) ~ "5X",
+            grepl("c10", sample) ~ "10X",
+        ),
+        dmg = case_when(
+            grepl("mid", sample) ~ "mid",
+            grepl("high", sample) ~ "high",
+        ),
+        assm = case_when(
+            grepl("7022", assembler) ~ "Carpedeam\n(unsafe)",
+            grepl("7020", assembler) ~ "Carpedeam\n(safe)",
+            grepl("megahit", assembler) ~ "Megahit",
+        )
+    ) |>
+    mutate(
+        cov = fct_relevel(cov, c("3X", "5X", "10X")),
+        dmg = fct_relevel(dmg, c("high", "mid")),
+        id = fct_relevel(id, c("nohit", "<98%", ">=98%"))
+    ) |>
+    filter(dmg == "high") |>
+    ggplot(aes(x = assm, y = n, fill = id)) +
+    geom_col(width = 1, color = "black", linewidth = 0.3) +
+    facet_grid2(c("type", "cov"),
+        labeller = "label_both",
+        scales = "free", independent = "all"
+    ) +
+    theme_bw() +
+    theme(
+        strip.background = element_blank(),
+        legend.position = "bottom",
+    ) +
+    scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300"), name = NULL) +
+    xlab("Assembler") +
+    ylab("Number of features")

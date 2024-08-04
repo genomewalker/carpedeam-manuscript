@@ -3,6 +3,7 @@
 .RData
 .Ruserdata
 src/.snakemake/*
+src/.snakemake-old/*
 old/*
 data/old/*
 results/old/*
