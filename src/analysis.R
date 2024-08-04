@@ -1330,9 +1330,11 @@ rna_searches |>
     mutate(
         type = ifelse(is.na(type), "nohit", type),
         id = case_when(
-            type == "nohit" ~ "nohit",
-            pident >= 98 ~ ">=98% ",
-            pident < 98 ~ "<98%"
+            type == "nohit" ~ "<90%",
+            pident >= 99 ~ ">=99% ",
+            pident >= 98 & pident < 99 ~ "[98%, 99%)",
+            pident >= 97 & pident < 98 ~ "[97%, 98%)",
+            pident < 97 ~ "<97%"
         )
     ) |>
     group_by(id, type, assembler, sample) |>
@@ -1358,7 +1360,7 @@ rna_searches |>
     mutate(
         cov = fct_relevel(cov, c("3X", "5X", "10X")),
         dmg = fct_relevel(dmg, c("high", "mid")),
-        id = fct_relevel(id, c("nohit", "<98%", ">=98%"))
+        id = fct_relevel(id, c("<90%", "<97%", "[97%, 98%)", "[98%, 99%)"))
     ) |>
     filter(dmg == "high") |>
     ggplot(aes(x = assm, y = n, fill = id)) +
@@ -1372,6 +1374,6 @@ rna_searches |>
         strip.background = element_blank(),
         legend.position = "bottom",
     ) +
-    scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300"), name = NULL) +
+    scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300", "#91AEB7", "#3A7B72"), name = NULL) +
     xlab("Assembler") +
     ylab("Number of features")

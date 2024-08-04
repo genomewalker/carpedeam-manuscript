@@ -1,7 +1,7 @@
-assembly_location: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/assemblies/ancientGut/"
-working_directory: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/genes/ancientGut"
-protein_location: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/genome-genes/ancientGut"
-genome_location: "/projects/fernandezguerra/people/kbd606/carpediem-manuscript/data/genomes/ancientGut"
+assembly_location: "/projects/fernandezguerra/people/kbd606/carpedeam-manuscript/data/assemblies/ancientGut/"
+working_directory: "/projects/fernandezguerra/people/kbd606/carpedeam-manuscript/data/genes/ancientGut"
+protein_location: "/projects/fernandezguerra/people/kbd606/carpedeam-manuscript/data/genome-genes/ancientGut"
+genome_location: "/projects/fernandezguerra/people/kbd606/carpedeam-manuscript/data/genomes/ancientGut"
 samples:
   gut_sum_high_c3: 4843e2efab
   gut_sum_high_c5: 5625abfa64
@@ -13,6 +13,7 @@ assemblers:
   - megahit
   - carpedeam-safe
   - carpedeam-unsafe
+  - carpedeam-unsafe-refined
 identity_thresholds:
   - 0.95
   - 1.00

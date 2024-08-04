@@ -9,6 +9,7 @@ def get_assembly_file(wildcards):
         "megahit": "raw-raw.assm.megahit.config0",
         "carpedeam-safe": "raw-raw.assm.carpedeam2.config7020CarpeDeam15p5",
         "carpedeam-unsafe": "raw-raw.assm.carpedeam2.config7022CarpeDeam15p5",
+        "carpedeam-unsafe-refined": "raw-raw.assm.config7022CarpeDeam15p5-megahit.split",
     }
     return os.path.join(
         config["assembly_location"],
@@ -23,55 +24,80 @@ def get_replacement_pattern(wildcards):
         return f"{wildcards.sample}" + "-cp_s-{nr}"
     elif wildcards.assembler == "carpedeam-unsafe":
         return f"{wildcards.sample}" + "-cp_u-{nr}"
+    elif wildcards.assembler == "carpedeam-unsafe-refined":
+        return f"{wildcards.sample}" + "-cp_u_r-{nr}"
     else:
         raise ValueError(f"Unknown assembler: {wildcards.assembler}")
+
 
 # Define the rule to specify the final targets
 rule all:
     input:
         expand(
             os.path.join(
-                config["working_directory"], "{sample}_{assembler}.renamed.faa"
+                config["working_directory"], "ani", "{sample}_{assembler}.ani.tsv"
             ),
             assembler=config["assemblers"],
             sample=config["samples"].keys(),
-        ),
-        expand(
-            os.path.join(config["working_directory"], "{sample}_{assembler}.gff"),
-            assembler=config["assemblers"],
-            sample=config["samples"].keys(),
-        ),
-        os.path.join(config["working_directory"], "protein_stats.tsv"),
-        expand(
-            os.path.join(
-                config["working_directory"], "protein_stats_derep_{identity}.tsv"
-            ),
-            identity=config["identity_thresholds"],
         ),
         expand(
             os.path.join(
                 config["working_directory"],
+                "ani",
+                "{sample}_{assembler}.search-skani.tsv",
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        gff=expand(
+            os.path.join(
+                config["working_directory"], "prodigal", "{sample}_{assembler}.gff"
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        faa=expand(
+            os.path.join(
+                config["working_directory"], "prodigal", "{sample}_{assembler}.faa"
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        renamed_faa=expand(
+            os.path.join(
+                config["working_directory"],
+                "renamed-proteins",
+                "{sample}_{assembler}.renamed.faa",
+            ),
+            assembler=config["assemblers"],
+            sample=config["samples"].keys(),
+        ),
+        prot_stats=os.path.join(
+            config["working_directory"], "protein-stats", "protein_stats.tsv"
+        ),
+        derep_stats=expand(
+            os.path.join(
+                config["working_directory"],
+                "derep-proteins-stats",
+                "protein_stats_derep_{identity}.tsv",
+            ),
+            identity=config["identity_thresholds"],
+        ),
+        p_s=expand(
+            os.path.join(
+                config["working_directory"],
+                "search-proteins",
                 "{sample}_{assembler}_{identity}_search.tsv",
             ),
             assembler=config["assemblers"],
             sample=config["samples"].keys(),
             identity=config["identity_thresholds"],
         ),
-        expand(
-            os.path.join(config["working_directory"], "{sample}_{assembler}.ani.tsv"),
-            assembler=config["assemblers"],
-            sample=config["samples"].keys(),
-        ),
-        expand(
+        c_s=expand(
             os.path.join(
-                config["working_directory"], "{sample}_{assembler}.search-skani.tsv"
-            ),
-            assembler=config["assemblers"],
-            sample=config["samples"].keys(),
-        ),
-        expand(
-            os.path.join(
-                config["working_directory"], "{sample}_{assembler}.contig_stats.tsv"
+                config["working_directory"],
+                "contig-stats",
+                "{sample}_{assembler}.contig_stats.tsv",
             ),
             assembler=config["assemblers"],
             sample=config["samples"].keys(),
@@ -79,6 +105,7 @@ rule all:
         derep=expand(
             os.path.join(
                 config["working_directory"],
+                "derep-proteins",
                 "{sample}_{assembler}_{identity}_rep_seq.fasta",
             ),
             assembler=config["assemblers"],
@@ -88,6 +115,7 @@ rule all:
         cluster=expand(
             os.path.join(
                 config["working_directory"],
+                "derep-proteins",
                 "{sample}_{assembler}_{identity}_cluster.tsv",
             ),
             assembler=config["assemblers"],
@@ -97,6 +125,7 @@ rule all:
         combined_rep_seq=expand(
             os.path.join(
                 config["working_directory"],
+                "cluster-assemblers",
                 "{sample}_{identity}-combined_rep_seq.fasta",
             ),
             sample=config["samples"].keys(),
@@ -104,7 +133,9 @@ rule all:
         ),
         combined_cluster=expand(
             os.path.join(
-                config["working_directory"], "{sample}_{identity}-combined_cluster.tsv"
+                config["working_directory"],
+                "cluster-assemblers",
+                "{sample}_{identity}-combined_cluster.tsv",
             ),
             sample=config["samples"].keys(),
             identity=config["identity_thresholds"],
@@ -117,7 +148,9 @@ rule get_contig_stats:
         assembly=get_assembly_file,
     output:
         os.path.join(
-            config["working_directory"], "{sample}_{assembler}.contig_stats.tsv"
+            config["working_directory"],
+            "contig-stats",
+            "{sample}_{assembler}.contig_stats.tsv",
         ),
     conda:
         "bioinfo"
@@ -132,8 +165,12 @@ rule run_prodigal:
     input:
         assembly=get_assembly_file,
     output:
-        faa=os.path.join(config["working_directory"], "{sample}_{assembler}.faa"),
-        gff=os.path.join(config["working_directory"], "{sample}_{assembler}.gff"),
+        faa=os.path.join(
+            config["working_directory"], "prodigal", "{sample}_{assembler}.faa"
+        ),
+        gff=os.path.join(
+            config["working_directory"], "prodigal", "{sample}_{assembler}.gff"
+        ),
     conda:
         "bioinfo"
     shell:
@@ -145,9 +182,15 @@ rule run_prodigal:
 # Rule to rename the protein IDs with seqkit
 rule rename_proteins:
     input:
-        faa=os.path.join(config["working_directory"], "{sample}_{assembler}.faa"),
+        faa=os.path.join(
+            config["working_directory"], "prodigal", "{sample}_{assembler}.faa"
+        ),
     output:
-        os.path.join(config["working_directory"], "{sample}_{assembler}.renamed.faa"),
+        os.path.join(
+            config["working_directory"],
+            "renamed-proteins",
+            "{sample}_{assembler}.renamed.faa",
+        ),
     params:
         replacement_pattern=lambda wildcards: get_replacement_pattern(wildcards),
     conda:
@@ -165,13 +208,15 @@ rule get_protein_stats:
     input:
         faa=expand(
             os.path.join(
-                config["working_directory"], "{sample}_{assembler}.renamed.faa"
+                config["working_directory"],
+                "renamed-proteins",
+                "{sample}_{assembler}.renamed.faa",
             ),
             assembler=config["assemblers"],
             sample=config["samples"].keys(),
         ),
     output:
-        os.path.join(config["working_directory"], "protein_stats.tsv"),
+        os.path.join(config["working_directory"], "protein-stats", "protein_stats.tsv"),
     conda:
         "bioinfo"
     threads: 16
@@ -186,23 +231,27 @@ rule get_protein_stats:
 # --kmer-per-seq 80 --cov-mode 1 -c 0.8 --min-seq-id 0.9
 # Rule to dereplicate proteins at various identity thresholds
 rule dereplicate_proteins:
-    wildcard_constraints:
-        identity=lambda identity: identity in config["identity_thresholds"],
     input:
         faa=os.path.join(
-            config["working_directory"], "{sample}_{assembler}.renamed.faa"
+            config["working_directory"],
+            "renamed-proteins",
+            "{sample}_{assembler}.renamed.faa",
         ),
     output:
         rep_seq=os.path.join(
             config["working_directory"],
+            "derep-proteins",
             "{sample}_{assembler}_{identity}_rep_seq.fasta",
         ),
         cluster=os.path.join(
-            config["working_directory"], "{sample}_{assembler}_{identity}_cluster.tsv"
+            config["working_directory"],
+            "derep-proteins",
+            "{sample}_{assembler}_{identity}_cluster.tsv",
         ),
     params:
         tmp_dir=lambda wildcards: os.path.join(
             config["working_directory"],
+            "derep-proteins",
             f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}",
         ),
         min_seq_id=lambda wildcards: wildcards.identity,
@@ -222,38 +271,46 @@ rule cluster_between_assemblers:
         rep_seq=lambda wildcards: expand(
             os.path.join(
                 config["working_directory"],
+                "derep-proteins",
                 "{sample}_{assembler}_{identity}_rep_seq.fasta",
             ),
             assembler=config["assemblers"],
-            sample=[wildcards.sample],  # Ensure only the current sample is included
+            sample=[wildcards.sample],
             identity=[wildcards.identity],
         ),
     output:
         combined_rep_seq=os.path.join(
             config["working_directory"],
+            "cluster-assemblers",
             "{sample}_{identity}-combined_rep_seq.fasta",
         ),
         combined_cluster=os.path.join(
-            config["working_directory"], "{sample}_{identity}-combined_cluster.tsv"
+            config["working_directory"],
+            "cluster-assemblers",
+            "{sample}_{identity}-combined_cluster.tsv",
         ),
     params:
         tmp_dir=lambda wildcards: os.path.join(
             config["working_directory"],
+            "cluster-assemblers",
             f"{wildcards.sample}_{wildcards.identity}-combined",
         ),
-    threads: 2,
+    threads: 2
     conda:
-        "bioinfo",
+        "bioinfo"
     shell:
         """
         mmseqs easy-cluster {input.rep_seq} {params.tmp_dir} {params.tmp_dir}_tmp --kmer-per-seq 80 --cov-mode 1 -c 0.8 --min-seq-id 0.95 --threads {threads}
         """
+
+
 # Rule to get the protein stats
 rule get_dereplicated_protein_stats:
     input:
         rep_seq=lambda wildcards: expand(
             os.path.join(
                 config["working_directory"],
+                "derep-proteins",
                 "{sample}_{assembler}_{identity}_rep_seq.fasta",
             ),
             assembler=config["assemblers"],
@@ -262,7 +319,9 @@ rule get_dereplicated_protein_stats:
         ),
     output:
         stats=os.path.join(
-            config["working_directory"], "protein_stats_derep_{identity}.tsv"
+            config["working_directory"],
+            "derep-proteins-stats",
+            "protein_stats_derep_{identity}.tsv",
         ),
     conda:
         "bioinfo"
@@ -279,24 +338,30 @@ rule search_proteins:
     input:
         rep_seq=os.path.join(
             config["working_directory"],
+            "derep-proteins",
             "{sample}_{assembler}_{identity}_rep_seq.fasta",
         ),
     output:
         os.path.join(
-            config["working_directory"], "{sample}_{assembler}_{identity}_search.tsv"
+            config["working_directory"],
+            "search-proteins",
+            "{sample}_{assembler}_{identity}_search.tsv",
         ),
     params:
         db=os.path.join(config["protein_location"], "ancientGut-aa"),
         query_db=lambda wildcards: os.path.join(
             config["working_directory"],
+            "search-proteins",
             f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}-aa",
         ),
         tmp_dir=lambda wildcards: os.path.join(
             config["working_directory"],
+            "search-proteins",
             f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}_tmp",
         ),
         resdb=lambda wildcards: os.path.join(
             config["working_directory"],
+            "search-proteins",
             f"{wildcards.sample}_{wildcards.assembler}_{wildcards.identity}",
         ),
     threads: 2
@@ -315,7 +380,7 @@ rule calculate_ani:
     input:
         assembly=get_assembly_file,
     output:
-        os.path.join(config["working_directory"], "{sample}_{assembler}.ani.tsv"),
+        os.path.join(config["working_directory"], "ani", "{sample}_{assembler}.ani.tsv"),
     conda:
         "bioinfo"
     shell:
@@ -330,7 +395,7 @@ rule search_ani:
         assembly=get_assembly_file,
     output:
         os.path.join(
-            config["working_directory"], "{sample}_{assembler}.search-skani.tsv"
+            config["working_directory"], "ani", "{sample}_{assembler}.search-skani.tsv"
         ),
     params:
         db=os.path.join(config["genome_location"], "gut_simulation_skani_sketch"),
