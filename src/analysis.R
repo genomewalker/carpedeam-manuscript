@@ -1377,3 +1377,59 @@ rna_searches |>
     scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300", "#91AEB7", "#3A7B72"), name = NULL) +
     xlab("Assembler") +
     ylab("Number of features")
+
+
+rna_searches |>
+    filter(tcov >= 80) |>
+    separate(target, into = c("accession", "type", "detail"), sep = "\\|", remove = F) |>
+    select(query, target, pident, type, detail, assembler, sample) |>
+    mutate(
+        type = ifelse(is.na(type), "nohit", type),
+        id = case_when(
+            type == "nohit" ~ "<90%",
+            pident >= 99 ~ ">=99% ",
+            pident >= 98 & pident < 99 ~ "[98%, 99%)",
+            pident >= 97 & pident < 98 ~ "[97%, 98%)",
+            pident < 97 ~ "<97%"
+        )
+    ) |>
+    group_by(id, type, assembler, sample) |>
+    count() |>
+    ungroup() |>
+    complete(id, type, assembler, sample, fill = list(n = 0)) |>
+    mutate(
+        cov = case_when(
+            grepl("c3", sample) ~ "3X",
+            grepl("c5", sample) ~ "5X",
+            grepl("c10", sample) ~ "10X",
+        ),
+        dmg = case_when(
+            grepl("mid", sample) ~ "mid",
+            grepl("high", sample) ~ "high",
+        ),
+        assm = case_when(
+            grepl("7022", assembler) ~ "Carpedeam\n(unsafe)",
+            grepl("7020", assembler) ~ "Carpedeam\n(safe)",
+            grepl("megahit", assembler) ~ "Megahit",
+        )
+    ) |>
+    mutate(
+        cov = fct_relevel(cov, c("3X", "5X", "10X")),
+        dmg = fct_relevel(dmg, c("high", "mid")),
+        id = fct_relevel(id, c("<90%", "<97%", "[97%, 98%)", "[98%, 99%)"))
+    ) |>
+    filter(dmg == "high") |>
+    ggplot(aes(x = assm, y = n, fill = id)) +
+    geom_col(width = 1, color = "black", linewidth = 0.3) +
+    facet_grid2(c("type", "cov"),
+        labeller = "label_both",
+        scales = "free", independent = "all"
+    ) +
+    theme_bw() +
+    theme(
+        strip.background = element_blank(),
+        legend.position = "bottom",
+    ) +
+    scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300", "#91AEB7", "#3A7B72"), name = NULL) +
+    xlab("Assembler") +
+    ylab("Number of features")
