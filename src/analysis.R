@@ -1079,6 +1079,15 @@ gff_data |>
     inner_join(contigs) |>
     mutate(coding_density = coding_bp / length) |>
     filter(coding_density < 1 / 2) |>
+    filter(sample == "gut_sum_high_c10", assembler == "carpedeam-safe")
+
+
+gff_data |>
+    group_by(sample, assembler, contig_id) |>
+    summarize(n = n(), coding_bp = sum(gene_length), .groups = "drop") |>
+    inner_join(contigs) |>
+    mutate(coding_density = coding_bp / length) |>
+    filter(coding_density < 1 / 2) |>
     group_by(sample, assembler) |>
     summarise(n = n(), length = sum(length), .groups = "drop") |>
     mutate(
@@ -1433,3 +1442,140 @@ rna_searches |>
     scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300", "#91AEB7", "#3A7B72"), name = NULL) +
     xlab("Assembler") +
     ylab("Number of features")
+
+
+# MINIPROT ANALYSIS
+# Read the miniProt search results
+mini_files <- list.files("./data/miniprot/ancientGut", full.names = TRUE, pattern = ".tsv")
+
+read_mini_files <- function(filename) {
+    sample <- str_extract(basename(filename), "^[^.]+")
+    # Extract the second part using str_extract
+    assembler <- str_extract(basename(filename), "(?<=\\.).*(?=\\.)")
+    assembler <- gsub("raw-raw", "raw-raw.assm", assembler)
+
+    df <- read_tsv(filename) |>
+        clean_names() |>
+        mutate(short_label = sample, long_label = assembler)
+    return(df)
+}
+
+# Read the miniProt search results
+mini_searches <- map_dfr(mini_files, read_mini_files) |>
+    filter(identity_percentage >= 0.95, query_coverage >= 0.95) |>
+    inner_join(smp_trans) |>
+    inner_join(assm_trans) |>
+    select(-short_label, -long_label)
+
+# remove redundant contigs
+non_redundant_contigs <- contigs %>%
+    filter(type != "redundant")
+
+# Get the non-redundant contigs and the best hit for each query
+mini_searches_nr <- mini_searches |>
+    inner_join(non_redundant_contigs %>% select(target_name = contig_id, sample, assembler)) |>
+    group_by(sample, assembler, query_name) |>
+    arrange(desc(identity_percentage), desc(query_coverage)) |>
+    slice(1) |>
+    ungroup()
+
+# Get the different events
+mini_searches_nr |>
+    select(sample, assembler, target_name, alignment_block_length, frameshift_deletion_events, frameshift_match_events, inframe_stops, insertions, substitutions, deletions) |>
+    group_by(sample, assembler) |>
+    summarize(
+        length = sum(alignment_block_length),
+        frameshift_deletion_events = sum(frameshift_deletion_events),
+        frameshift_match_events = sum(frameshift_match_events),
+        inframe_stops = sum(inframe_stops),
+        insertions = sum(insertions),
+        substitutions = sum(substitutions),
+        deletions = sum(deletions),
+        .groups = "drop"
+    ) |>
+    pivot_longer(cols = c(frameshift_deletion_events, frameshift_match_events, inframe_stops, insertions, substitutions, deletions), names_to = "type", values_to = "n") |>
+    mutate(prop = n / length) |>
+    mutate(
+        cov = case_when(
+            grepl("c3", sample) ~ "3X",
+            grepl("c5", sample) ~ "5X",
+            grepl("c10", sample) ~ "10X",
+        ),
+        dmg = case_when(
+            grepl("mid", sample) ~ "mid",
+            grepl("high", sample) ~ "high",
+        ),
+        assm = case_when(
+            grepl("carpedeam-unsafe", assembler) ~ "Carpedeam\n(unsafe)",
+            grepl("carpedeam-safe", assembler) ~ "Carpedeam\n(safe)",
+            grepl("megahit", assembler) ~ "Megahit",
+        )
+    ) |>
+    filter(dmg == "high") |>
+    mutate(
+        cov = fct_relevel(cov, c("3X", "5X", "10X")),
+        dmg = fct_relevel(dmg, c("high", "mid")),
+    ) |>
+    ggplot(aes(x = assm, y = prop, fill = type)) +
+    geom_col(width = 0.8, color = "black", linewidth = 0.3, position = "dodge") +
+    facet_grid2(c("dmg", "cov"),
+        labeller = "label_both",
+        scales = "free", independent = "all"
+    ) +
+    scale_y_continuous(labels = scales::percent, trans = "sqrt") +
+    theme_bw() +
+    theme(
+        strip.background = element_blank(),
+        legend.position = "bottom",
+    ) +
+    scale_fill_manual(values = c("#2D2D2D", "#EB554A", "#FFC300", "#91AEB7", "#3A7B72", "#F09868"), name = NULL)
+
+# Get the number of truncated genes
+mini_searches_nr |>
+    select(sample, assembler, truncated) |>
+    group_by(sample, assembler, truncated) |>
+    summarize(
+        n = n(),
+        .groups = "drop"
+    ) |>
+    group_by(sample, assembler) |>
+    mutate(prop = n / sum(n)) |>
+    ungroup() |>
+    mutate(
+        cov = case_when(
+            grepl("c3", sample) ~ "3X",
+            grepl("c5", sample) ~ "5X",
+            grepl("c10", sample) ~ "10X",
+        ),
+        dmg = case_when(
+            grepl("mid", sample) ~ "mid",
+            grepl("high", sample) ~ "high",
+        ),
+        assm = case_when(
+            grepl("carpedeam-unsafe", assembler) ~ "Carpedeam\n(unsafe)",
+            grepl("carpedeam-safe", assembler) ~ "Carpedeam\n(safe)",
+            grepl("megahit", assembler) ~ "Megahit",
+        ),
+        truncated = case_when(
+            truncated == "FALSE" ~ "Non truncated",
+            truncated == "TRUE" ~ "Truncated"
+        )
+    ) |>
+    filter(dmg == "high", truncated == "Truncated") |>
+    mutate(
+        cov = fct_relevel(cov, c("3X", "5X", "10X")),
+        dmg = fct_relevel(dmg, c("high", "mid")),
+    ) |>
+    ggplot(aes(x = assm, y = prop, fill = truncated)) +
+    geom_col(width = 1, color = "black", linewidth = 0.3) +
+    facet_grid2(c("dmg", "cov"),
+        labeller = "label_both",
+        scales = "free", independent = "all"
+    ) +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw() +
+    theme(
+        strip.background = element_blank(),
+        legend.position = "none",
+    ) +
+    scale_fill_manual(values = c("#2D2D2D"), name = NULL)
